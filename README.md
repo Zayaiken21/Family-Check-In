@@ -1,112 +1,126 @@
-# Family Check-In
+# Family Visit Compliance — GitHub Pages + Render + Supabase
 
-A mobile-first GitHub Pages app for consent-based parent visit check-ins and authorized caseworker review.
-
-## What it does
-
-- Parent and caseworker accounts with Supabase Auth
-- Explicit **Confirm location** action using the browser Geolocation API
-- High-accuracy GPS request with recorded accuracy radius
-- Server-generated timestamps stored in PostgreSQL
-- Optional **virtual check-in** workflow with caseworker review
-- 45-minute cadence display with a 10-minute grace period
-- Weekly / monthly / yearly / all-time history
-- CSV export for records
-- Caseworker-parent linking through expiring 6-character invite codes
-- Caseworker dashboard for multiple linked parents
-- Location map for submitted GPS check-ins
-- Row Level Security so unrelated accounts cannot see one another's data
-- Mobile/PWA-friendly interface for iPhone, Android, tablets, and desktop
+A mobile-first, consent-based visit documentation system for structured parent/caseworker check-ins.
 
 ## Architecture
 
-GitHub Pages hosts only the static frontend. **Supabase** provides authentication and the PostgreSQL database. This is necessary because GitHub Pages cannot securely store multi-user check-in history or enforce caseworker access by itself.
+- **GitHub Pages:** static parent/caseworker frontend and PWA.
+- **Render:** stateless Node/Express API, access validation, WebRTC signaling, report generation/email. It does **not** persist family, visit, GPS, or call media data.
+- **Supabase:** long-term system of record for cases, participants, visits, check-ins and report-delivery status.
+- **WebRTC:** encrypted browser-to-browser audio/video. Render relays signaling only. No call recording is implemented.
+- **Resend (optional):** sends finalized visit PDF + CSV to the supervisor configured in Render.
 
-The public Supabase `anon` key in `config.js` is expected in a browser app. Security depends on enabling the Row Level Security policies in `supabase.sql`. Never place a Supabase `service_role` key in this repository.
+## Visit workflow
 
-## 1. Create the backend
+1. Parent opens the GitHub Pages frontend and chooses **Parent**.
+2. Parent enters assigned case code, exact display name and access PIN. No email/password account is used.
+3. First parent selects **Start / Join 120-minute visit**. A second parent on the same case can join the same active visit.
+4. Each parent can submit explicit GPS, virtual or video-device check-ins. GPS is requested only when the parent presses the location button.
+5. At the second total check-in, the visit becomes **Review Ready**. Nothing is automatically labeled compliant.
+6. A caseworker signs in on the same frontend, reviews the check-ins and marks the visit **Compliant** or **Non-compliant**.
+7. The finalized result remains in Supabase. Render generates a PDF and CSV and, if email delivery is configured, sends both to the supervisor.
 
-1. Create a new Supabase project.
-2. Open **SQL Editor**.
-3. Paste the entire contents of `supabase.sql` and run it once.
-4. In **Authentication > URL Configuration**, add your GitHub Pages URL to the allowed redirect/site URLs if email confirmation is enabled.
-5. Decide whether email confirmation should be required for new accounts.
+## 1. Supabase
 
-## 2. Configure the frontend
+Create a Supabase project and run `supabase.sql` in the SQL editor.
 
-Open `config.js` and replace:
+The browser does **not** receive a Supabase key. All database access goes through Render using the service-role key, and all tables have RLS enabled with no public policies.
 
-- `https://YOUR_PROJECT.supabase.co`
-- `YOUR_SUPABASE_ANON_KEY`
+### Create the case and PINs
 
-with the values shown under your Supabase project's API settings.
+Install server dependencies locally:
 
-Do **not** put the service-role key in `config.js`.
+```bash
+npm install
+node scripts/hash-pin.mjs 123456
+```
 
-## 3. Publish on GitHub Pages
+Copy the bcrypt output into `SETUP.sql.example`, replace the case UUID/names, and run those inserts in Supabase. Use separate PINs for each participant.
 
-Keep these files at the repository root:
+## 2. Render backend
 
-- `index.html`
-- `styles.css`
-- `app.js`
-- `config.js`
-- `manifest.json`
-- `sw.js`
-- `supabase.sql` (can remain in the repo for reference)
+Push the whole repository to GitHub, then create a Render Web Service from the **same repo**, or use `render.yaml`.
 
-Then in GitHub:
+Required environment variables:
 
-1. Open repository **Settings > Pages**.
-2. Choose **Deploy from a branch**.
-3. Select `main` and `/ (root)`.
-4. Save.
-5. Open the generated `https://YOUR-NAME.github.io/YOUR-REPO/` URL.
+- `JWT_SECRET` — long random secret; `render.yaml` can generate it.
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY` — backend only. Never put this in `config.js`.
+- `FRONTEND_ORIGINS` — e.g. `https://YOURNAME.github.io`
 
-Browser geolocation requires HTTPS; GitHub Pages provides HTTPS.
+Supervisor report email:
 
-## Suggested workflow
+- `RESEND_API_KEY`
+- `REPORT_FROM` — must use a sender/domain accepted by your email provider.
+- `SUPERVISOR_EMAIL` — destination for every finalized visit report.
 
-### Caseworker
-1. Create a caseworker account.
-2. Press **Create parent invite**.
-3. Send the six-character code directly to the parent.
-4. Once linked, the parent's records appear on the dashboard.
-5. Location records can be opened on a map.
-6. Virtual check-ins can be marked Verified or Rejected.
-7. Export the displayed history as CSV when needed.
+WebRTC production reliability:
 
-### Parent
-1. Create a parent account.
-2. Enter the caseworker's invite code.
-3. At the required interval, press **Confirm location** and permit precise location access.
-4. The check-in captures location only at that moment; it does not continuously track the phone.
-5. If a virtual check-in is appropriate under the case plan, submit it for caseworker review.
+- `TURN_URL`
+- `TURN_USERNAME`
+- `TURN_CREDENTIAL`
 
-## Important reliability notes
+STUN is included by default. A TURN relay is strongly recommended before court/agency production because peer-to-peer WebRTC can fail on restrictive cellular, agency or enterprise networks. TURN credentials can be from a service such as Twilio Network Traversal, Metered, Cloudflare TURN, or your own coturn server.
 
-### 45-minute reminders
-The dashboard countdown is precise while the page/app is active. Browsers—especially iOS—do not guarantee that JavaScript or service workers can wake up every 45 minutes after the app is closed. For court-critical reminders, use a phone alarm/calendar as a backup or add a server-side SMS/push reminder service later.
+Check:
 
-### Location is evidence, not infallible proof
-Browser GPS records can document what a device reports, including its accuracy radius, but a web app alone cannot prove who physically possessed the phone or make GPS impossible to spoof. Do not represent the system as forensic or tamper-proof unless it has undergone an appropriate security/evidentiary review.
+`https://YOUR-RENDER-SERVICE.onrender.com/healthz`
 
-### Court orders control
-The app does not change, interpret, waive, or override an order of protection or visitation order. Only use virtual check-ins, communication, or physical locations that are permitted by the actual court order and caseworker instructions.
+It should return JSON containing `"ok": true`.
 
-## Production hardening recommended before agency deployment
+## 3. GitHub Pages frontend
 
-- Have the agency/court approve the workflow and retention policy.
-- Use organization-managed caseworker accounts rather than open self-signup.
-- Add MFA for caseworkers.
-- Add a restricted server-side RPC for virtual-review updates so only review columns can change.
-- Configure database backups and retention.
-- Create formal audit-event records for sign-in, invite creation, relationship changes and review actions.
-- Add account suspension / transfer procedures when a worker changes cases.
-- Add a server-side reminder system (SMS/push/email) if missed alerts have consequences.
-- Consider a custom domain and agency privacy notice.
-- Conduct a privacy/security review before storing sensitive family-court records at scale.
+Edit `config.js`:
 
-## Data retention
+```js
+window.APP_CONFIG = {
+  API_URL: "https://YOUR-RENDER-SERVICE.onrender.com",
+  VISIT_MINUTES: 120,
+  CHECKIN_INTERVAL_MINUTES: 45,
+  REMINDER_GRACE_MINUTES: 10,
+  APP_NAME: "Family Visit Compliance"
+};
+```
 
-The UI intentionally has no delete button for check-ins. Supabase administrators can still implement an agency-approved retention/deletion process. Long-term location history is sensitive; retain only as long as the governing court/agency policy permits.
+In GitHub: **Settings → Pages → Deploy from branch → main → /(root)**.
+
+HTTPS is required for browser camera, microphone and precise geolocation outside localhost. GitHub Pages supplies HTTPS.
+
+## iPhone installation
+
+1. Open the GitHub Pages URL in **Safari**.
+2. Tap **Share**.
+3. Tap **Add to Home Screen**.
+4. Open the installed icon.
+5. When used, allow Location, Camera and Microphone.
+
+The app also contains an **Add to Home** button that displays these directions on iOS.
+
+## Android installation
+
+Chrome/Edge can show a native PWA install prompt. Otherwise use browser menu → **Install app** / **Add to Home screen**.
+
+## Camera and calls
+
+The **Camera / Mic** button tests browser permissions without uploading a recording. Calls use `getUserMedia` and `RTCPeerConnection` with Socket.IO only for offer/answer/ICE signaling. The application intentionally does not record or store call audio/video.
+
+## Important production notes
+
+- This system records what a device submits. GPS may be inaccurate or spoofed and does not independently prove who possessed the device.
+- Do not claim a virtual/video call is recorded unless you separately implement lawful recording with appropriate notice/consent.
+- Use separate participant PINs and rotate a PIN immediately if exposed.
+- Keep Render's service-role key and JWT secret out of GitHub.
+- Use a paid/always-on Render instance for a production court workflow if cold starts would be unacceptable.
+- Use TURN before depending on WebRTC across unknown mobile/agency networks.
+- Test iPhone Safari, Android Chrome, desktop Chrome/Edge/Safari, GPS, report email, and both sides of calling with the actual deployment before operational use.
+
+## Files
+
+- `index.html`, `styles.css`, `app.js`, `config.js` — GitHub Pages frontend
+- `manifest.json`, `sw.js`, `assets/` — installable PWA
+- `server/server.js` — stateless Render API + WebRTC signaling
+- `supabase.sql` — database schema
+- `SETUP.sql.example` — case/participant bootstrap example
+- `render.yaml` — Render blueprint
+- `.env.example` — backend environment template
+- `scripts/hash-pin.mjs` — PIN hashing helper

@@ -1,21 +1,25 @@
-# Privacy and Safety Notes
+# Privacy and data design
 
-Family Check-In is intentionally designed around explicit parent actions rather than continuous location surveillance.
+## Stored in Supabase
+- case metadata
+- assigned participant names and bcrypt PIN hashes
+- visit start/end/review timestamps
+- parent check-in timestamps
+- submitted GPS coordinates and reported accuracy
+- check-in method and optional notes
+- caseworker compliance determination and note
+- supervisor report delivery status
 
-## Location collection
-- Location is requested only after the parent presses **Confirm location**.
-- The browser displays its own location-permission prompt.
-- A check-in may include latitude, longitude, device-reported accuracy, altitude, speed, heading, client timestamp and server timestamp.
-- The app does not silently track the device in the background.
+## Not persistently stored on Render
+Render holds only transient process memory needed to serve requests, validate a request, create a report, and relay WebRTC signaling. The application code does not write family records to Render's filesystem or a Render database.
 
-## Access
-- A parent can read their own records.
-- A caseworker can read records only after an active parent-caseworker relationship is created using an invite code.
-- A parent can revoke that relationship from the app.
-- Row Level Security policies enforce these rules in the database, not just in the user interface.
+## Not stored by the app
+- browser video/audio call media
+- camera test footage
+- continuous/background GPS trails
 
-## Sensitive information
-Precise location and family-court information are highly sensitive. Do not use a public spreadsheet or put exported CSV files in a public GitHub repository. Treat exports as confidential case records.
+## Consent design
+Geolocation is requested only after a parent presses **Confirm location**. Camera/microphone activate only after the user requests a device test, initiates a call, accepts a call, or chooses a video check-in.
 
-## Accuracy
-GPS accuracy varies by device, building, network and environment. The app stores the device-reported accuracy radius so reviewers can see uncertainty rather than treating coordinates as exact.
+## Retention
+The schema does not automatically delete court/visit records. Organizations should adopt a written retention policy and configure Supabase backups/access controls accordingly.

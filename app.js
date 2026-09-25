@@ -1,373 +1,42 @@
-(() => {
-  'use strict';
+(()=>{
+const cfg=window.APP_CONFIG;const $=id=>document.getElementById(id);const els={};['loginView','appView','parentView','workerView','loginForm','caseCode','displayName','accessPin','loginMsg','logoutBtn','roleLabel','welcome','caseLabel','onlineDot','networkStatus','visitStatus','visitStatusSub','visitTimer','myCheckins','nextDue','accuracy','startVisitBtn','gpsBtn','virtualBtn','videoCheckBtn','note','checkMsg','parentCallTarget','workerCallTarget','parentCallBtn','workerCallBtn','parentHistory','workerHistory','parentRange','workerRange','parentCount','activeVisits','readyReviews','completedVisits','visitCards','refreshBtn','turnBadge','installBtn','installDialog','installSteps','deviceBtn','deviceDialog','preview','switchCam','deviceMsg','callDialog','callTitle','callState','remoteVideo','localVideo','micBtn','camBtn','hangupBtn','callMsg','incomingDialog','incomingName','declineBtn','acceptBtn','reviewDialog','reviewSummary','reviewNote','markNon','markCompliant','reviewMsg'].forEach(x=>els[x]=$(x));
+let role='parent',token=sessionStorage.getItem('fvc_token')||'',user=null,caseInfo=null,members=[],dashboard={visits:[],checkins:[]},activeVisit=null,socket=null,iceServers=[],pc=null,callStream=null,currentPeer=null,currentCallId=null,pendingCall=null,deviceStream=null,facing='user',reviewVisitId=null,timerId=null,deferredInstall=null;
+const api=async(path,opt={})=>{const r=await fetch(cfg.API_URL+path,{...opt,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{ }),...(opt.headers||{})}});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||`Request failed ${r.status}`);return j};
+const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+const fmt=d=>new Intl.DateTimeFormat([], {dateStyle:'medium',timeStyle:'short'}).format(new Date(d));
+const mins=n=>`${Math.max(0,Math.round(n))} min`;
 
-  const cfg = window.APP_CONFIG || {};
-  const INTERVAL_MIN = Number(cfg.CHECKIN_INTERVAL_MINUTES || 45);
-  const GRACE_MIN = Number(cfg.LATE_GRACE_MINUTES || 10);
-  const configured = cfg.SUPABASE_URL && !cfg.SUPABASE_URL.includes('YOUR_PROJECT') && cfg.SUPABASE_ANON_KEY && !cfg.SUPABASE_ANON_KEY.includes('YOUR_SUPABASE');
-  const db = configured ? window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY) : null;
-
-  const $ = (id) => document.getElementById(id);
-  const els = {};
-  ['authView','parentView','caseworkerView','logoutBtn','notificationBtn','authForm','authTitle','authSubmit','authMessage','email','password','nameField','fullName','roleField','role','parentWelcome','parentLinkStatus','nextCheckin','nextCheckinSub','weekCount','onTimeRate','lastAccuracy','dueBadge','gpsCheckinBtn','virtualCheckinBtn','checkinNote','checkinResult','inviteCodeInput','linkCaseworkerBtn','linkedCaseworkers','parentRange','parentHistoryBody','parentExportBtn','caseworkerWelcome','newInviteBtn','linkedParentCount','lateParentCount','todayCheckins','pendingVirtual','parentCards','inviteList','caseworkerParentFilter','caseworkerRange','caseworkerHistoryBody','caseworkerExportBtn','mapDialog','mapTitle','mapMeta','closeMapBtn','inviteDialog','closeInviteBtn','inviteCodeDisplay','copyInviteBtn'].forEach(id => els[id] = $(id));
-
-  let authMode = 'signin';
-  let session = null;
-  let profile = null;
-  let currentCheckins = [];
-  let linkedProfiles = [];
-  let timerHandle = null;
-  let leafletMap = null;
-  let leafletMarker = null;
-  let lastInviteCode = '';
-
-  const fmt = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-  const shortTime = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
-
-  document.querySelectorAll('[data-auth-mode]').forEach(btn => btn.addEventListener('click', () => setAuthMode(btn.dataset.authMode)));
-  els.authForm.addEventListener('submit', handleAuth);
-  els.logoutBtn.addEventListener('click', () => db?.auth.signOut());
-  els.notificationBtn.addEventListener('click', enableNotifications);
-  els.gpsCheckinBtn.addEventListener('click', submitLocationCheckin);
-  els.virtualCheckinBtn.addEventListener('click', submitVirtualCheckin);
-  els.linkCaseworkerBtn.addEventListener('click', linkCaseworker);
-  els.parentRange.addEventListener('change', loadParentData);
-  els.parentExportBtn.addEventListener('click', () => exportCSV(currentCheckins, 'my-checkins.csv'));
-  els.newInviteBtn.addEventListener('click', createInvite);
-  els.caseworkerRange.addEventListener('change', loadCaseworkerData);
-  els.caseworkerParentFilter.addEventListener('change', renderCaseworkerHistory);
-  els.caseworkerExportBtn.addEventListener('click', () => exportCSV(filteredCaseworkerRows(), 'caseworker-checkins.csv', true));
-  els.closeMapBtn.addEventListener('click', () => els.mapDialog.close());
-  els.closeInviteBtn.addEventListener('click', () => els.inviteDialog.close());
-  els.copyInviteBtn.addEventListener('click', async () => {
-    if (!lastInviteCode) return;
-    await navigator.clipboard.writeText(lastInviteCode);
-    els.copyInviteBtn.textContent = 'Copied'; setTimeout(() => els.copyInviteBtn.textContent = 'Copy code', 1200);
-  });
-
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
-
-  if (!configured) {
-    els.authMessage.textContent = 'Setup required: add your Supabase URL and anon key to config.js, then run supabase.sql.';
-  } else {
-    db.auth.getSession().then(({ data }) => applySession(data.session));
-    db.auth.onAuthStateChange((_event, newSession) => applySession(newSession));
-  }
-
-  function setAuthMode(mode) {
-    authMode = mode;
-    document.querySelectorAll('[data-auth-mode]').forEach(b => b.classList.toggle('active', b.dataset.authMode === mode));
-    const signup = mode === 'signup';
-    els.nameField.classList.toggle('hidden', !signup);
-    els.roleField.classList.toggle('hidden', !signup);
-    els.authTitle.textContent = signup ? 'Create your account' : 'Welcome back';
-    els.authSubmit.textContent = signup ? 'Create account' : 'Sign in';
-    els.password.autocomplete = signup ? 'new-password' : 'current-password';
-    els.authMessage.textContent = '';
-  }
-
-  async function handleAuth(e) {
-    e.preventDefault();
-    if (!db) return;
-    els.authSubmit.disabled = true;
-    els.authMessage.textContent = '';
-    const email = els.email.value.trim();
-    const password = els.password.value;
-    try {
-      if (authMode === 'signup') {
-        const full_name = els.fullName.value.trim();
-        if (!full_name) throw new Error('Please enter your full name.');
-        const { error } = await db.auth.signUp({ email, password, options: { data: { full_name, role: els.role.value } } });
-        if (error) throw error;
-        els.authMessage.style.color = '#147d50';
-        els.authMessage.textContent = 'Account created. If email confirmation is enabled, check your email before signing in.';
-      } else {
-        const { error } = await db.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-      }
-    } catch (err) {
-      els.authMessage.style.color = '#b72a37'; els.authMessage.textContent = err.message || 'Unable to continue.';
-    } finally { els.authSubmit.disabled = false; }
-  }
-
-  async function applySession(newSession) {
-    session = newSession;
-    stopTimer();
-    if (!session) {
-      profile = null;
-      els.authView.classList.remove('hidden');
-      els.parentView.classList.add('hidden'); els.caseworkerView.classList.add('hidden'); els.logoutBtn.classList.add('hidden');
-      return;
-    }
-    els.logoutBtn.classList.remove('hidden');
-    const { data, error } = await db.from('profiles').select('*').eq('id', session.user.id).single();
-    if (error || !data) { alert('Your profile could not be loaded. Confirm that supabase.sql was installed.'); return; }
-    profile = data;
-    els.authView.classList.add('hidden');
-    if (profile.role === 'caseworker') {
-      els.parentView.classList.add('hidden'); els.caseworkerView.classList.remove('hidden');
-      els.caseworkerWelcome.textContent = `${profile.full_name || 'Caseworker'} — visit verification overview`;
-      await loadCaseworkerData();
-    } else {
-      els.caseworkerView.classList.add('hidden'); els.parentView.classList.remove('hidden');
-      els.parentWelcome.textContent = `${profile.full_name || 'Parent'} — your visit check-ins`;
-      await loadParentData();
-      startTimer();
-    }
-  }
-
-  function daysAgoISO(range) {
-    if (range === 'all') return null;
-    const d = new Date(Date.now() - Number(range) * 86400000);
-    return d.toISOString();
-  }
-
-  async function loadParentData() {
-    if (!session) return;
-    const since = daysAgoISO(els.parentRange.value);
-    let q = db.from('checkins').select('*').eq('parent_id', session.user.id).order('captured_at', { ascending: false }).limit(5000);
-    if (since) q = q.gte('captured_at', since);
-    const [{ data: checks, error: checkErr }, { data: relations, error: relErr }] = await Promise.all([
-      q,
-      db.from('relationships').select('id,caseworker_id,active,profiles!relationships_caseworker_id_fkey(id,full_name,email)').eq('parent_id', session.user.id).eq('active', true)
-    ]);
-    if (checkErr) console.error(checkErr);
-    if (relErr) console.error(relErr);
-    currentCheckins = checks || [];
-    linkedProfiles = (relations || []).map(r => ({ relation_id: r.id, ...(r.profiles || {}), caseworker_id: r.caseworker_id }));
-    renderParentMetrics(); renderParentHistory(); renderLinkedCaseworkers();
-  }
-
-  function renderParentMetrics() {
-    const now = Date.now();
-    const weekAgo = now - 7 * 86400000;
-    const week = currentCheckins.filter(c => new Date(c.captured_at).getTime() >= weekAgo);
-    els.weekCount.textContent = week.length;
-    const loc = currentCheckins.filter(c => c.mode === 'location');
-    const onTime = loc.filter(c => c.on_time === true).length;
-    els.onTimeRate.textContent = loc.length ? `${Math.round(onTime / loc.length * 100)}%` : '—';
-    const lastAcc = loc.find(c => c.accuracy_m != null);
-    els.lastAccuracy.textContent = lastAcc ? `${Math.round(lastAcc.accuracy_m)} m` : '—';
-    els.parentLinkStatus.textContent = linkedProfiles.length ? `${linkedProfiles.length} caseworker${linkedProfiles.length > 1 ? 's' : ''} linked` : 'No caseworker linked';
-    updateDueState();
-  }
-
-  function updateDueState() {
-    const last = currentCheckins[0];
-    if (!last) {
-      els.nextCheckin.textContent = 'Now'; els.nextCheckinSub.textContent = 'Start your first check-in'; setBadge('Ready', 'neutral'); return;
-    }
-    const due = new Date(last.captured_at).getTime() + INTERVAL_MIN * 60000;
-    const diff = due - Date.now();
-    if (diff > 0) {
-      els.nextCheckin.textContent = duration(diff); els.nextCheckinSub.textContent = `Due ${shortTime.format(new Date(due))}`; setBadge('On schedule', 'good');
-    } else if (diff > -GRACE_MIN * 60000) {
-      els.nextCheckin.textContent = 'Due now'; els.nextCheckinSub.textContent = `Due ${shortTime.format(new Date(due))}`; setBadge('Due', 'warn');
-    } else {
-      els.nextCheckin.textContent = 'Late'; els.nextCheckinSub.textContent = `Was due ${shortTime.format(new Date(due))}`; setBadge('Late', 'bad');
-    }
-  }
-
-  function setBadge(text, cls) { els.dueBadge.textContent = text; els.dueBadge.className = `badge ${cls}`; }
-  function duration(ms) { const total = Math.max(0, Math.floor(ms / 1000)); const m = Math.floor(total / 60); const s = total % 60; return `${m}:${String(s).padStart(2,'0')}`; }
-  function startTimer() { stopTimer(); updateDueState(); timerHandle = setInterval(updateDueState, 1000); }
-  function stopTimer() { if (timerHandle) clearInterval(timerHandle); timerHandle = null; }
-
-  function renderParentHistory() {
-    els.parentHistoryBody.innerHTML = currentCheckins.length ? currentCheckins.map(c => `
-      <tr><td>${esc(fmt.format(new Date(c.captured_at)))}</td><td>${modeLabel(c.mode)}</td><td>${statusBadge(c)}</td><td>${c.accuracy_m != null ? `${Math.round(c.accuracy_m)} m` : '—'}</td><td>${c.latitude != null ? `<button class="location-link" data-map="${c.id}">View map</button>` : '—'}</td><td>${esc(c.note || '—')}</td></tr>`).join('') : `<tr><td colspan="6" class="empty">No check-ins in this period.</td></tr>`;
-    els.parentHistoryBody.querySelectorAll('[data-map]').forEach(b => b.addEventListener('click', () => openMap(currentCheckins.find(c => c.id === b.dataset.map))));
-  }
-
-  function renderLinkedCaseworkers() {
-    els.linkedCaseworkers.innerHTML = linkedProfiles.length ? linkedProfiles.map(p => `<div class="stack-item"><div class="row"><div><b>${esc(p.full_name || 'Caseworker')}</b><br><small>${esc(p.email || '')}</small></div><button class="mini-btn danger" data-unlink="${p.relation_id}">Revoke</button></div></div>`).join('') : `<div class="empty">No linked caseworkers yet.</div>`;
-    els.linkedCaseworkers.querySelectorAll('[data-unlink]').forEach(b => b.addEventListener('click', async () => {
-      if (!confirm('Revoke this caseworker link? Existing records will remain in your account but this caseworker will lose access.')) return;
-      const { error } = await db.from('relationships').update({ active: false, revoked_at: new Date().toISOString() }).eq('id', b.dataset.unlink).eq('parent_id', session.user.id);
-      if (error) alert(error.message); else loadParentData();
-    }));
-  }
-
-  async function submitLocationCheckin() {
-    if (!navigator.geolocation) return showCheckinResult('This browser does not support location services.', true);
-    els.gpsCheckinBtn.disabled = true; els.gpsCheckinBtn.textContent = 'Getting GPS…';
-    navigator.geolocation.getCurrentPosition(async pos => {
-      try {
-        const payload = {
-          parent_id: session.user.id,
-          mode: 'location',
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          accuracy_m: pos.coords.accuracy,
-          altitude_m: pos.coords.altitude,
-          speed_mps: pos.coords.speed,
-          heading_deg: pos.coords.heading,
-          client_recorded_at: new Date(pos.timestamp).toISOString(),
-          note: els.checkinNote.value.trim() || null,
-          review_status: 'submitted'
-        };
-        const { data, error } = await db.from('checkins').insert(payload).select().single();
-        if (error) throw error;
-        showCheckinResult(`Location check-in recorded at ${fmt.format(new Date(data.captured_at))}. GPS accuracy: about ${Math.round(data.accuracy_m)} meters.`);
-        els.checkinNote.value = '';
-        await loadParentData();
-      } catch (err) { showCheckinResult(err.message, true); }
-      finally { els.gpsCheckinBtn.disabled = false; els.gpsCheckinBtn.textContent = '📍 Confirm location'; }
-    }, err => {
-      const msg = err.code === 1 ? 'Location permission was denied. Allow location access in your browser settings, then try again.' : err.code === 2 ? 'Your device could not determine its location.' : 'Location request timed out. Try moving near a window or outdoors.';
-      showCheckinResult(msg, true); els.gpsCheckinBtn.disabled = false; els.gpsCheckinBtn.textContent = '📍 Confirm location';
-    }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
-  }
-
-  async function submitVirtualCheckin() {
-    els.virtualCheckinBtn.disabled = true;
-    try {
-      const { data, error } = await db.from('checkins').insert({ parent_id: session.user.id, mode: 'virtual', note: els.checkinNote.value.trim() || null, review_status: 'pending' }).select().single();
-      if (error) throw error;
-      showCheckinResult(`Virtual check-in request recorded at ${fmt.format(new Date(data.captured_at))}. It is marked pending until an authorized caseworker reviews it.`);
-      els.checkinNote.value = ''; await loadParentData();
-    } catch (err) { showCheckinResult(err.message, true); }
-    finally { els.virtualCheckinBtn.disabled = false; }
-  }
-
-  function showCheckinResult(text, error = false) { els.checkinResult.classList.remove('hidden'); els.checkinResult.style.background = error ? '#fff0f1' : '#edf6ff'; els.checkinResult.style.borderColor = error ? '#ffd0d5' : '#cfe2ff'; els.checkinResult.textContent = text; }
-
-  async function linkCaseworker() {
-    const code = els.inviteCodeInput.value.trim().toUpperCase();
-    if (code.length !== 6) return alert('Enter the six-character invite code.');
-    els.linkCaseworkerBtn.disabled = true;
-    const { data, error } = await db.rpc('redeem_caseworker_invite', { invite_code_input: code });
-    els.linkCaseworkerBtn.disabled = false;
-    if (error) return alert(error.message);
-    if (!data?.ok) return alert(data?.message || 'Invite could not be used.');
-    els.inviteCodeInput.value = ''; await loadParentData();
-  }
-
-  async function createInvite() {
-    const { data, error } = await db.rpc('create_parent_invite');
-    if (error) return alert(error.message);
-    lastInviteCode = data.code;
-    els.inviteCodeDisplay.textContent = data.code;
-    els.inviteDialog.showModal();
-    await loadCaseworkerData();
-  }
-
-  async function loadCaseworkerData() {
-    if (!session) return;
-    const since = daysAgoISO(els.caseworkerRange.value);
-    const [{ data: relations, error: relErr }, { data: invites, error: invErr }] = await Promise.all([
-      db.from('relationships').select('id,parent_id,active,created_at,profiles!relationships_parent_id_fkey(id,full_name,email)').eq('caseworker_id', session.user.id).eq('active', true),
-      db.from('invites').select('id,code,expires_at,used_at,created_at').eq('caseworker_id', session.user.id).order('created_at', { ascending:false }).limit(30)
-    ]);
-    if (relErr) console.error(relErr); if (invErr) console.error(invErr);
-    linkedProfiles = (relations || []).map(r => ({ relation_id:r.id, parent_id:r.parent_id, ...(r.profiles || {}) }));
-    const ids = linkedProfiles.map(p => p.parent_id);
-    let checks = [];
-    if (ids.length) {
-      let q = db.from('checkins').select('*').in('parent_id', ids).order('captured_at',{ascending:false}).limit(10000);
-      if (since) q = q.gte('captured_at', since);
-      const { data, error } = await q; if (error) console.error(error); checks = data || [];
-    }
-    currentCheckins = checks;
-    renderCaseworkerMetrics(); renderParentCards(); renderInvites(invites || []); populateParentFilter(); renderCaseworkerHistory();
-  }
-
-  function renderCaseworkerMetrics() {
-    els.linkedParentCount.textContent = linkedProfiles.length;
-    const now = Date.now();
-    const todayStart = new Date(); todayStart.setHours(0,0,0,0);
-    els.todayCheckins.textContent = currentCheckins.filter(c => new Date(c.captured_at) >= todayStart).length;
-    els.pendingVirtual.textContent = currentCheckins.filter(c => c.mode === 'virtual' && c.review_status === 'pending').length;
-    let late = 0;
-    linkedProfiles.forEach(p => { const last = currentCheckins.find(c => c.parent_id === p.parent_id); if (!last || (now - new Date(last.captured_at).getTime()) > (INTERVAL_MIN + GRACE_MIN) * 60000) late++; });
-    els.lateParentCount.textContent = late;
-  }
-
-  function renderParentCards() {
-    const now = Date.now();
-    els.parentCards.innerHTML = linkedProfiles.length ? linkedProfiles.map(p => {
-      const last = currentCheckins.find(c => c.parent_id === p.parent_id);
-      const mins = last ? Math.floor((now - new Date(last.captured_at).getTime()) / 60000) : null;
-      const state = mins == null ? ['No check-in','bad'] : mins <= INTERVAL_MIN ? ['On schedule','good'] : mins <= INTERVAL_MIN + GRACE_MIN ? ['Due','warn'] : ['Late','bad'];
-      return `<div class="parent-card"><div class="row"><div><b>${esc(p.full_name || p.email || 'Parent')}</b><br><small>${last ? `Last: ${esc(fmt.format(new Date(last.captured_at)))}` : 'No check-ins yet'}</small></div><span class="badge ${state[1]}">${state[0]}</span></div></div>`;
-    }).join('') : `<div class="empty">No parents linked yet. Create an invite code to begin.</div>`;
-  }
-
-  function renderInvites(invites) {
-    const now = Date.now();
-    els.inviteList.innerHTML = invites.length ? invites.map(i => { const expired = new Date(i.expires_at).getTime() < now; const state = i.used_at ? 'Used' : expired ? 'Expired' : 'Active'; return `<div class="stack-item"><div class="row"><div><b style="letter-spacing:.12em">${esc(i.code)}</b><br><small>${state} • expires ${esc(fmt.format(new Date(i.expires_at)))}</small></div></div></div>`; }).join('') : `<div class="empty">No invites created yet.</div>`;
-  }
-
-  function populateParentFilter() {
-    const val = els.caseworkerParentFilter.value;
-    els.caseworkerParentFilter.innerHTML = '<option value="all">All parents</option>' + linkedProfiles.map(p => `<option value="${p.parent_id}">${esc(p.full_name || p.email || 'Parent')}</option>`).join('');
-    if ([...els.caseworkerParentFilter.options].some(o => o.value === val)) els.caseworkerParentFilter.value = val;
-  }
-
-  function filteredCaseworkerRows() { const id = els.caseworkerParentFilter.value; return id === 'all' ? currentCheckins : currentCheckins.filter(c => c.parent_id === id); }
-
-  function renderCaseworkerHistory() {
-    const rows = filteredCaseworkerRows();
-    els.caseworkerHistoryBody.innerHTML = rows.length ? rows.map(c => {
-      const p = linkedProfiles.find(x => x.parent_id === c.parent_id);
-      const review = c.mode === 'virtual' && c.review_status === 'pending' ? `<button class="mini-btn" data-approve="${c.id}">Verify</button> <button class="mini-btn danger" data-reject="${c.id}">Reject</button>` : esc(c.review_status || 'submitted');
-      return `<tr><td>${esc(p?.full_name || p?.email || 'Parent')}</td><td>${esc(fmt.format(new Date(c.captured_at)))}</td><td>${modeLabel(c.mode)}</td><td>${statusBadge(c)}</td><td>${c.accuracy_m != null ? `${Math.round(c.accuracy_m)} m` : '—'}</td><td>${c.latitude != null ? `<button class="location-link" data-map="${c.id}">View map</button>` : '—'}</td><td>${review}</td></tr>`;
-    }).join('') : `<tr><td colspan="7" class="empty">No check-ins in this period.</td></tr>`;
-    els.caseworkerHistoryBody.querySelectorAll('[data-map]').forEach(b => b.addEventListener('click', () => openMap(currentCheckins.find(c => c.id === b.dataset.map))));
-    els.caseworkerHistoryBody.querySelectorAll('[data-approve]').forEach(b => b.addEventListener('click', () => reviewVirtual(b.dataset.approve, 'verified')));
-    els.caseworkerHistoryBody.querySelectorAll('[data-reject]').forEach(b => b.addEventListener('click', () => reviewVirtual(b.dataset.reject, 'rejected')));
-  }
-
-  async function reviewVirtual(id, status) {
-    const { error } = await db.from('checkins').update({ review_status: status, reviewed_by: session.user.id, reviewed_at: new Date().toISOString() }).eq('id', id);
-    if (error) alert(error.message); else loadCaseworkerData();
-  }
-
-  function openMap(c) {
-    if (!c || c.latitude == null) return;
-    const p = profile?.role === 'caseworker' ? linkedProfiles.find(x => x.parent_id === c.parent_id) : profile;
-    els.mapTitle.textContent = `${p?.full_name || 'Parent'} • ${fmt.format(new Date(c.captured_at))}`;
-    els.mapMeta.innerHTML = `Coordinates: <b>${Number(c.latitude).toFixed(6)}, ${Number(c.longitude).toFixed(6)}</b><br>Reported GPS accuracy radius: <b>${c.accuracy_m != null ? Math.round(c.accuracy_m)+' meters' : 'unknown'}</b><br>Method: <b>${modeLabel(c.mode)}</b>`;
-    els.mapDialog.showModal();
-    setTimeout(() => {
-      const point = [c.latitude,c.longitude];
-      if (!leafletMap) {
-        leafletMap = L.map('map').setView(point, 16);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(leafletMap);
-      } else leafletMap.setView(point,16);
-      if (leafletMarker) leafletMarker.remove();
-      leafletMarker = L.marker(point).addTo(leafletMap).bindPopup('Recorded check-in location').openPopup();
-      if (c.accuracy_m) L.circle(point,{radius:c.accuracy_m}).addTo(leafletMap);
-      leafletMap.invalidateSize();
-    },100);
-  }
-
-  async function enableNotifications() {
-    if (!('Notification' in window)) return alert('Notifications are not supported in this browser.');
-    const permission = await Notification.requestPermission();
-    els.notificationBtn.textContent = permission === 'granted' ? 'Reminders enabled' : 'Enable reminders';
-    if (permission === 'granted') new Notification('Family Check-In reminders enabled', { body: 'Keep the app open or installed for the best reminder reliability.' });
-  }
-
-  function modeLabel(mode) { return mode === 'location' ? '📍 Location' : '🎥 Virtual'; }
-  function statusBadge(c) {
-    if (c.review_status === 'verified') return '<span class="badge good">Verified</span>';
-    if (c.review_status === 'rejected') return '<span class="badge bad">Rejected</span>';
-    if (c.mode === 'virtual') return '<span class="badge warn">Pending review</span>';
-    return c.on_time === false ? '<span class="badge bad">Late</span>' : '<span class="badge good">Submitted</span>';
-  }
-
-  function exportCSV(rows, filename, includeParent = false) {
-    const header = includeParent ? ['Parent','Captured At','Method','Review Status','On Time','Latitude','Longitude','Accuracy M','Note'] : ['Captured At','Method','Review Status','On Time','Latitude','Longitude','Accuracy M','Note'];
-    const data = rows.map(c => {
-      const p = linkedProfiles.find(x => (x.parent_id || x.id) === c.parent_id);
-      const base = [c.captured_at,c.mode,c.review_status,c.on_time,c.latitude,c.longitude,c.accuracy_m,c.note || ''];
-      return includeParent ? [p?.full_name || p?.email || c.parent_id,...base] : base;
-    });
-    const csv = [header,...data].map(row => row.map(csvCell).join(',')).join('\n');
-    const blob = new Blob([csv],{type:'text/csv;charset=utf-8'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=filename; a.click(); URL.revokeObjectURL(a.href);
-  }
-
-  function csvCell(v){ const s=v==null?'':String(v); return `"${s.replaceAll('"','""')}"`; }
-  function esc(v){ return String(v ?? '').replace(/[&<>'"]/g,ch=>({ '&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;' }[ch])); }
+document.querySelectorAll('[data-role]').forEach(b=>b.onclick=()=>{role=b.dataset.role;document.querySelectorAll('[data-role]').forEach(x=>x.classList.toggle('active',x===b));});
+els.loginForm.onsubmit=async e=>{e.preventDefault();els.loginMsg.textContent='Checking access…';try{const j=await api('/api/login',{method:'POST',body:JSON.stringify({caseCode:els.caseCode.value.trim(),role,displayName:els.displayName.value.trim(),pin:els.accessPin.value})});token=j.token;sessionStorage.setItem('fvc_token',token);setIdentity(j);await enterApp();}catch(err){els.loginMsg.textContent=err.message;}};
+els.logoutBtn.onclick=()=>{sessionStorage.removeItem('fvc_token');location.reload()};
+async function boot(){try{const c=await fetch(cfg.API_URL+'/api/public-config').then(r=>r.json());iceServers=c.iceServers||[];els.turnBadge.textContent=c.turnConfigured?'TURN relay ready':'Direct calling';els.turnBadge.className='badge '+(c.turnConfigured?'good':'warn');}catch{els.turnBadge.textContent='RTC config unavailable';}if(token){try{const j=await api('/api/me');setIdentity(j);await enterApp();}catch{sessionStorage.removeItem('fvc_token');token='';}}setupInstall();if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});}
+function setIdentity(j){user=j.user;caseInfo=j.case;members=j.members||[];}
+async function enterApp(){els.loginView.classList.add('hidden');els.appView.classList.remove('hidden');els.logoutBtn.classList.remove('hidden');els.roleLabel.textContent=user.role==='parent'?'PARENT PORTAL':'CASEWORKER PORTAL';els.welcome.textContent=`Welcome, ${user.display_name}`;els.caseLabel.textContent=`${caseInfo.label} • Case ${caseInfo.case_code} • ${caseInfo.visit_minutes||120}-minute visits`;els.parentView.classList.toggle('hidden',user.role!=='parent');els.workerView.classList.toggle('hidden',user.role!=='caseworker');populateCalls();connectSocket();await refresh();timerId=setInterval(renderTimers,1000);}
+function populateCalls(){const p=members.filter(m=>m.role==='parent'&&m.id!==user.id),w=members.filter(m=>m.role==='caseworker'&&m.id!==user.id);els.parentCallTarget.innerHTML='<option value="">Select caseworker</option>'+w.map(x=>`<option value="${x.id}">${esc(x.display_name)}</option>`).join('');els.workerCallTarget.innerHTML='<option value="">Select parent</option>'+p.map(x=>`<option value="${x.id}">${esc(x.display_name)}</option>`).join('');}
+async function refresh(){const j=await api(`/api/case/${caseInfo.id}/dashboard`);dashboard=j;activeVisit=dashboard.visits.find(v=>v.status==='active')||null;render();}
+function render(){if(user.role==='parent')renderParent();else renderWorker();renderTimers();}
+function rangeDays(v){return v==='all'?Infinity:Number(v)}
+function inRange(ts,days){return days===Infinity||Date.now()-new Date(ts).getTime()<=days*864e5}
+function renderParent(){const mine=dashboard.checkins.filter(c=>c.parent_id===user.id);const activeMine=activeVisit?mine.filter(c=>c.visit_id===activeVisit.id):[];els.visitStatus.textContent=activeVisit?'Active':(dashboard.visits[0]?.status?dashboard.visits[0].status.replace('_',' '):'Not started');els.visitStatusSub.textContent=activeVisit?`Started ${fmt(activeVisit.started_at)}`:'Start when your visit begins';els.myCheckins.textContent=activeMine.length;const lastGps=mine.find(c=>c.accuracy_m!=null);els.accuracy.textContent=lastGps?`±${Math.round(lastGps.accuracy_m)} m`:'—';[els.gpsBtn,els.virtualBtn,els.videoCheckBtn].forEach(b=>b.disabled=!activeVisit);const days=rangeDays(els.parentRange.value);const visits=Object.fromEntries(dashboard.visits.map(v=>[v.id,v]));els.parentHistory.innerHTML=mine.filter(c=>inRange(c.created_at,days)).map(c=>`<tr><td>${fmt(visits[c.visit_id]?.started_at||c.created_at)}</td><td>${fmt(c.created_at)}</td><td>${esc(c.method)}</td><td>${c.accuracy_m!=null?`±${Math.round(c.accuracy_m)} m`:'—'}</td><td>${esc((visits[c.visit_id]?.status||'active').replace('_',' '))}</td></tr>`).join('')||'<tr><td colspan="5">No check-ins in this period.</td></tr>';}
+function renderWorker(){const parents=members.filter(m=>m.role==='parent');els.parentCount.textContent=parents.length;els.activeVisits.textContent=dashboard.visits.filter(v=>v.status==='active').length;els.readyReviews.textContent=dashboard.visits.filter(v=>v.status==='active'&&v.review_ready).length;els.completedVisits.textContent=dashboard.visits.filter(v=>v.status!=='active').length;els.visitCards.innerHTML=dashboard.visits.slice(0,12).map(v=>{const checks=dashboard.checkins.filter(c=>c.visit_id===v.id),byParent=parents.map(p=>({p,c:checks.filter(c=>c.parent_id===p.id)})).filter(x=>x.c.length);return `<div class="visit-card"><div class="row"><div><h4>${fmt(v.started_at)}</h4><small>${checks.length} total check-in${checks.length===1?'':'s'} • ends ${fmt(v.ends_at)}</small></div><span class="badge ${v.status==='compliant'?'good':v.status==='non_compliant'?'bad':v.review_ready?'warn':''}">${esc(v.status.replace('_',' '))}</span></div><ul class="check-list">${byParent.map(x=>`<li><b>${esc(x.p.display_name)}</b> — ${x.c.length} check-in${x.c.length===1?'':'s'} ${x.c.map(c=>`#${c.checkin_number} ${esc(c.method)}`).join(' · ')}</li>`).join('')||'<li>No check-ins yet</li>'}</ul>${v.status==='active'?`<button class="${v.review_ready?'primary':'ghost'} wide review-btn" data-id="${v.id}" ${v.review_ready?'':'disabled'}>${v.review_ready?'Finalize visit':'Waiting for second check-in'}</button>`:`<a class="ghost report-link" href="${cfg.API_URL}/api/case/${caseInfo.id}/visit/${v.id}/report.pdf" data-report="${v.id}">Download report</a>`}</div>`}).join('')||'<div class="muted">No visits recorded yet.</div>';document.querySelectorAll('.review-btn').forEach(b=>b.onclick=()=>openReview(b.dataset.id));document.querySelectorAll('[data-report]').forEach(a=>a.onclick=downloadReport);const days=rangeDays(els.workerRange.value),byId=Object.fromEntries(members.map(m=>[m.id,m]));els.workerHistory.innerHTML=dashboard.checkins.filter(c=>inRange(c.created_at,days)).map(c=>`<tr><td>${esc(byId[c.parent_id]?.display_name||'Parent')}</td><td>${fmt(dashboard.visits.find(v=>v.id===c.visit_id)?.started_at||c.created_at)}</td><td>${fmt(c.created_at)}</td><td>${esc(c.method)}</td><td>${c.latitude!=null?`${c.latitude.toFixed(5)}, ${c.longitude.toFixed(5)} (±${Math.round(c.accuracy_m||0)}m)`:'—'}</td></tr>`).join('')||'<tr><td colspan="5">No check-ins in this period.</td></tr>';}
+function renderTimers(){if(!activeVisit){els.visitTimer.textContent='2:00:00';els.nextDue.textContent='No active visit';return;}const remain=Math.max(0,new Date(activeVisit.ends_at)-Date.now());const h=Math.floor(remain/36e5),m=Math.floor(remain%36e5/6e4),s=Math.floor(remain%6e4/1000);els.visitTimer.textContent=`${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;const mine=dashboard.checkins.filter(c=>c.visit_id===activeVisit.id&&c.parent_id===user.id);const base=mine.length?new Date(mine[mine.length-1].created_at).getTime():new Date(activeVisit.started_at).getTime();const due=base+(caseInfo.checkin_interval_minutes||45)*60000;const delta=(due-Date.now())/60000;els.nextDue.textContent=delta>0?`Next check-in in ${mins(delta)}`:`Check-in due ${mins(-delta)} ago`;}
+els.startVisitBtn.onclick=async()=>{try{const j=await api(`/api/case/${caseInfo.id}/visit/start`,{method:'POST',body:'{}'});activeVisit=j.visit;await refresh();flash('Visit started/joined. Your first check-in can be submitted now.');}catch(e){flash(e.message,true)}};
+els.gpsBtn.onclick=()=>navigator.geolocation?navigator.geolocation.getCurrentPosition(p=>submitCheck('location',{latitude:p.coords.latitude,longitude:p.coords.longitude,accuracy:p.coords.accuracy}),e=>flash(`Location unavailable: ${e.message}`,true),{enableHighAccuracy:true,timeout:15000,maximumAge:0}):flash('This browser does not support location.',true);
+els.virtualBtn.onclick=()=>submitCheck('virtual',{});els.videoCheckBtn.onclick=async()=>{await openDevice(true);if(deviceStream)submitCheck('video',{});};
+async function submitCheck(method,extra){try{const j=await api(`/api/case/${caseInfo.id}/checkin`,{method:'POST',body:JSON.stringify({visitId:activeVisit.id,method,note:els.note.value.trim(),...extra})});els.note.value='';flash(`${method==='location'?'Location':'Check-in'} #${j.checkin.checkin_number} recorded at ${fmt(j.checkin.created_at)}.${j.reviewReady?' The visit is now eligible for caseworker review.':''}`);await refresh();}catch(e){flash(e.message,true)}}
+function flash(s,bad=false){els.checkMsg.classList.remove('hidden');els.checkMsg.style.background=bad?'#fee4e2':'#eefbf4';els.checkMsg.style.color=bad?'#b42318':'#137a4d';els.checkMsg.textContent=s;}
+els.parentRange.onchange=renderParent;els.workerRange.onchange=renderWorker;els.refreshBtn.onclick=refresh;
+function openReview(id){reviewVisitId=id;const v=dashboard.visits.find(x=>x.id===id),cs=dashboard.checkins.filter(x=>x.visit_id===id);els.reviewSummary.textContent=`Visit started ${fmt(v.started_at)} with ${cs.length} submitted check-ins. Choose the final caseworker determination.`;els.reviewNote.value='';els.reviewMsg.textContent='';els.reviewDialog.showModal();}
+els.markCompliant.onclick=()=>finalize('compliant');els.markNon.onclick=()=>finalize('non_compliant');async function finalize(outcome){els.reviewMsg.textContent='Finalizing and preparing supervisor report…';try{const j=await api(`/api/case/${caseInfo.id}/visit/${reviewVisitId}/review`,{method:'POST',body:JSON.stringify({outcome,note:els.reviewNote.value.trim()})});els.reviewMsg.textContent=`Recorded as ${outcome.replace('_',' ')}. Supervisor delivery: ${j.reportDelivery.status}.`;await refresh();setTimeout(()=>els.reviewDialog.close(),1200);}catch(e){els.reviewMsg.textContent=e.message;}}
+async function downloadReport(e){e.preventDefault();const id=e.currentTarget.dataset.report;try{const r=await fetch(`${cfg.API_URL}/api/case/${caseInfo.id}/visit/${id}/report.pdf`,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok)throw new Error('Could not download report');const blob=await r.blob(),u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=`visit-${id}.pdf`;a.click();setTimeout(()=>URL.revokeObjectURL(u),5000);}catch(err){alert(err.message)}}
+function connectSocket(){socket=io(cfg.API_URL,{auth:{token},transports:['websocket','polling']});socket.on('connect',()=>{els.onlineDot.classList.add('online');els.networkStatus.textContent='Connected';socket.emit('presence:hello')});socket.on('disconnect',()=>{els.onlineDot.classList.remove('online');els.networkStatus.textContent='Reconnecting'});socket.on('checkin:new',refresh);socket.on('visit:reviewed',refresh);socket.on('rtc:incoming',x=>{pendingCall=x;els.incomingName.textContent=`${x.fromName} is calling`;els.incomingDialog.showModal()});socket.on('rtc:answer',async x=>{if(pc&&x.callId===currentCallId)await pc.setRemoteDescription(x.answer)});socket.on('rtc:ice',async x=>{if(pc&&x.callId===currentCallId&&x.candidate)try{await pc.addIceCandidate(x.candidate)}catch{}});socket.on('rtc:declined',()=>endCall('Call declined'));socket.on('rtc:ended',()=>endCall('Call ended'));}
+async function getMedia(){return navigator.mediaDevices.getUserMedia({video:{facingMode:facing},audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}})}
+function makePeer(targetId){pc=new RTCPeerConnection({iceServers});pc.onicecandidate=e=>e.candidate&&socket.emit('rtc:ice',{targetId,callId:currentCallId,candidate:e.candidate});pc.ontrack=e=>els.remoteVideo.srcObject=e.streams[0];pc.onconnectionstatechange=()=>{els.callState.textContent=pc.connectionState;if(['failed','closed'].includes(pc.connectionState))endCall('Connection ended')};callStream.getTracks().forEach(t=>pc.addTrack(t,callStream));return pc;}
+async function startCall(targetId){if(!targetId)return alert('Select a person to call.');try{currentPeer=targetId;currentCallId=crypto.randomUUID();callStream=await getMedia();els.localVideo.srcObject=callStream;els.callDialog.showModal();els.callState.textContent='Calling';makePeer(targetId);const offer=await pc.createOffer();await pc.setLocalDescription(offer);socket.emit('rtc:call',{targetId,callId:currentCallId,offer});}catch(e){endCall(e.message);}}
+els.parentCallBtn.onclick=()=>startCall(els.parentCallTarget.value);els.workerCallBtn.onclick=()=>startCall(els.workerCallTarget.value);els.acceptBtn.onclick=async()=>{try{const x=pendingCall;pendingCall=null;currentPeer=x.fromId;currentCallId=x.callId;callStream=await getMedia();els.localVideo.srcObject=callStream;els.incomingDialog.close();els.callDialog.showModal();makePeer(currentPeer);await pc.setRemoteDescription(x.offer);const answer=await pc.createAnswer();await pc.setLocalDescription(answer);socket.emit('rtc:answer',{targetId:currentPeer,callId:currentCallId,answer});els.callState.textContent='Connected';}catch(e){endCall(e.message)}};els.declineBtn.onclick=()=>{if(pendingCall)socket.emit('rtc:decline',{targetId:pendingCall.fromId,callId:pendingCall.callId});pendingCall=null;els.incomingDialog.close()};els.hangupBtn.onclick=()=>{if(currentPeer)socket.emit('rtc:end',{targetId:currentPeer,callId:currentCallId});endCall('Call ended')};function endCall(msg=''){try{pc?.close()}catch{}callStream?.getTracks().forEach(t=>t.stop());pc=null;callStream=null;els.localVideo.srcObject=null;els.remoteVideo.srcObject=null;currentPeer=null;currentCallId=null;els.callMsg.textContent=msg;if(els.callDialog.open)els.callDialog.close();}
+els.micBtn.onclick=()=>{const t=callStream?.getAudioTracks()[0];if(t){t.enabled=!t.enabled;els.micBtn.textContent=t.enabled?'Mute':'Unmute'}};els.camBtn.onclick=()=>{const t=callStream?.getVideoTracks()[0];if(t){t.enabled=!t.enabled;els.camBtn.textContent=t.enabled?'Camera off':'Camera on'}};
+async function openDevice(forCheck=false){try{deviceStream?.getTracks().forEach(t=>t.stop());deviceStream=await getMedia();els.preview.srcObject=deviceStream;els.deviceDialog.showModal();els.deviceMsg.textContent=forCheck?'Camera/mic verified. Close this panel after confirming your device works; the video itself is not saved.':'Camera and microphone are working. Nothing is uploaded.';}catch(e){els.deviceMsg.textContent=`Unable to open camera/mic: ${e.message}`}}
+els.deviceBtn.onclick=()=>openDevice(false);els.switchCam.onclick=async()=>{facing=facing==='user'?'environment':'user';await openDevice(false)};document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>{const d=$(b.dataset.close);if(d===els.deviceDialog){deviceStream?.getTracks().forEach(t=>t.stop());deviceStream=null;els.preview.srcObject=null}d.close()});
+function setupInstall(){window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstall=e});els.installBtn.onclick=async()=>{if(deferredInstall){deferredInstall.prompt();await deferredInstall.userChoice;deferredInstall=null;return}const ios=/iphone|ipad|ipod/i.test(navigator.userAgent);els.installSteps.innerHTML=ios?'<ol><li>Open this page in <b>Safari</b>.</li><li>Tap the <b>Share</b> button.</li><li>Scroll and choose <b>Add to Home Screen</b>.</li><li>Tap <b>Add</b>.</li><li>Open the new icon and allow Location, Camera, Microphone, and Notifications when requested.</li></ol>':'<ol><li>Open this site in Chrome.</li><li>Tap the browser menu (⋮).</li><li>Choose <b>Install app</b> or <b>Add to Home screen</b>.</li><li>Confirm Install.</li></ol>';els.installDialog.showModal()}}
+boot();
 })();

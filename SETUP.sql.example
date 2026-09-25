@@ -1,0 +1,15 @@
+-- 1) Run supabase.sql first.
+-- 2) Generate each PIN hash locally:
+--      npm install
+--      node scripts/hash-pin.mjs 123456
+-- 3) Insert your case and participants. Replace all placeholders.
+
+insert into public.cases (case_code,label,visit_minutes,checkin_interval_minutes)
+values ('FAMILY-2026','Family Visit Case',120,45);
+
+-- Find the case UUID, then insert BOTH parents and the caseworker.
+-- pin_hash must be a bcrypt hash, never a plain PIN.
+insert into public.participants (case_id,role,display_name,pin_hash) values
+  ('CASE_UUID','parent','Parent One','$2b$12$REPLACE_WITH_HASH'),
+  ('CASE_UUID','parent','Parent Two','$2b$12$REPLACE_WITH_HASH'),
+  ('CASE_UUID','caseworker','Caseworker Name','$2b$12$REPLACE_WITH_HASH');
