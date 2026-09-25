@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#0a63ff" />
+  <meta name="description" content="Consent-based parent check-ins and caseworker review." />
+  <title>Family Check-In</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="preconnect" href="https://unpkg.com" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-wrap">
+        <div class="brand-mark">✓</div>
+        <div>
+          <h1>Family Check-In</h1>
+          <p>Clear, consent-based visit verification</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button id="notificationBtn" class="ghost-btn" type="button">Enable reminders</button>
+        <button id="logoutBtn" class="ghost-btn hidden" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="authView" class="auth-layout">
+        <div class="hero-card">
+          <span class="eyebrow">VISIT COMPLIANCE • DOCUMENTATION • PRIVACY</span>
+          <h2>Check in when required. Keep a clean record. Share only with authorized caseworkers.</h2>
+          <p>This app captures location only when a parent presses the location check-in button. It is not continuous background tracking.</p>
+          <div class="feature-grid">
+            <article><b>45-minute cadence</b><span>Countdowns, due-state warnings, and missed-window reporting.</span></article>
+            <article><b>Verified timestamps</b><span>Records use database/server time rather than the phone clock.</span></article>
+            <article><b>Long-term history</b><span>Weekly, monthly and custom-date review with CSV export.</span></article>
+            <article><b>Role-based access</b><span>Parents only share with linked caseworker accounts.</span></article>
+          </div>
+        </div>
+
+        <form id="authForm" class="panel auth-card">
+          <div class="tabs">
+            <button class="tab active" type="button" data-auth-mode="signin">Sign in</button>
+            <button class="tab" type="button" data-auth-mode="signup">Create account</button>
+          </div>
+          <h3 id="authTitle">Welcome back</h3>
+          <label>Email<input id="email" type="email" autocomplete="email" required /></label>
+          <label>Password<input id="password" type="password" minlength="8" autocomplete="current-password" required /></label>
+          <label id="nameField" class="hidden">Full name<input id="fullName" type="text" autocomplete="name" /></label>
+          <label id="roleField" class="hidden">Account type
+            <select id="role"><option value="parent">Parent</option><option value="caseworker">Caseworker</option></select>
+          </label>
+          <button class="primary-btn wide" type="submit" id="authSubmit">Sign in</button>
+          <p id="authMessage" class="message" aria-live="polite"></p>
+        </form>
+      </section>
+
+      <section id="parentView" class="dashboard hidden">
+        <div class="dashboard-head">
+          <div><span class="eyebrow">PARENT DASHBOARD</span><h2 id="parentWelcome">Your visit check-ins</h2></div>
+          <div class="status-pill" id="parentLinkStatus">No caseworker linked</div>
+        </div>
+
+        <div class="metrics-grid">
+          <article class="metric"><span>Next check-in</span><strong id="nextCheckin">—</strong><small id="nextCheckinSub">No active sequence</small></article>
+          <article class="metric"><span>This week</span><strong id="weekCount">0</strong><small>submitted check-ins</small></article>
+          <article class="metric"><span>On-time rate</span><strong id="onTimeRate">—</strong><small>location check-ins</small></article>
+          <article class="metric"><span>Last accuracy</span><strong id="lastAccuracy">—</strong><small>GPS radius</small></article>
+        </div>
+
+        <div class="two-col">
+          <section class="panel checkin-panel">
+            <div class="panel-title-row"><div><span class="eyebrow">CHECK IN</span><h3>Confirm your status</h3></div><span id="dueBadge" class="badge neutral">Ready</span></div>
+            <p class="muted">Location is requested only when you press “Confirm location.” Your browser will ask permission.</p>
+            <div class="checkin-actions">
+              <button id="gpsCheckinBtn" class="primary-btn big" type="button">📍 Confirm location</button>
+              <button id="virtualCheckinBtn" class="secondary-btn big" type="button">🎥 Virtual check-in</button>
+            </div>
+            <label>Optional note<textarea id="checkinNote" maxlength="500" placeholder="Example: At library during visit; next check-in at 3:15 PM."></textarea></label>
+            <div id="checkinResult" class="result-box hidden" aria-live="polite"></div>
+          </section>
+
+          <section class="panel">
+            <span class="eyebrow">CASEWORKER LINK</span><h3>Connect your authorized reviewer</h3>
+            <p class="muted">Enter the six-character invite code provided by your caseworker. You can revoke the link later.</p>
+            <div class="inline-form"><input id="inviteCodeInput" maxlength="6" placeholder="ABC123" /><button id="linkCaseworkerBtn" class="secondary-btn" type="button">Link</button></div>
+            <div id="linkedCaseworkers" class="stack-list"></div>
+          </section>
+        </div>
+
+        <section class="panel">
+          <div class="panel-title-row"><div><span class="eyebrow">HISTORY</span><h3>Your check-in record</h3></div><button id="parentExportBtn" class="ghost-btn" type="button">Export CSV</button></div>
+          <div class="filters"><select id="parentRange"><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option><option value="365">Last year</option><option value="all">All time</option></select></div>
+          <div class="table-wrap"><table><thead><tr><th>Time</th><th>Method</th><th>Status</th><th>Accuracy</th><th>Location</th><th>Note</th></tr></thead><tbody id="parentHistoryBody"></tbody></table></div>
+        </section>
+      </section>
+
+      <section id="caseworkerView" class="dashboard hidden">
+        <div class="dashboard-head">
+          <div><span class="eyebrow">CASEWORKER DASHBOARD</span><h2 id="caseworkerWelcome">Visit verification overview</h2></div>
+          <button id="newInviteBtn" class="primary-btn" type="button">Create parent invite</button>
+        </div>
+
+        <div class="metrics-grid">
+          <article class="metric"><span>Linked parents</span><strong id="linkedParentCount">0</strong><small>active relationships</small></article>
+          <article class="metric"><span>Due / late now</span><strong id="lateParentCount">0</strong><small>based on 45-minute cadence</small></article>
+          <article class="metric"><span>Check-ins today</span><strong id="todayCheckins">0</strong><small>all linked parents</small></article>
+          <article class="metric"><span>Virtual pending</span><strong id="pendingVirtual">0</strong><small>awaiting review</small></article>
+        </div>
+
+        <div class="two-col case-grid">
+          <section class="panel">
+            <div class="panel-title-row"><div><span class="eyebrow">PARENTS</span><h3>Linked accounts</h3></div></div>
+            <div id="parentCards" class="parent-cards"></div>
+          </section>
+          <section class="panel">
+            <span class="eyebrow">INVITES</span><h3>Active invitation codes</h3>
+            <div id="inviteList" class="stack-list"></div>
+          </section>
+        </div>
+
+        <section class="panel">
+          <div class="panel-title-row"><div><span class="eyebrow">AUDIT HISTORY</span><h3>Parent check-ins</h3></div><button id="caseworkerExportBtn" class="ghost-btn" type="button">Export CSV</button></div>
+          <div class="filters">
+            <select id="caseworkerParentFilter"><option value="all">All parents</option></select>
+            <select id="caseworkerRange"><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option><option value="365">Last year</option><option value="all">All time</option></select>
+          </div>
+          <div class="table-wrap"><table><thead><tr><th>Parent</th><th>Time</th><th>Method</th><th>Status</th><th>Accuracy</th><th>Location</th><th>Action</th></tr></thead><tbody id="caseworkerHistoryBody"></tbody></table></div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="mapDialog"><div class="dialog-head"><div><span class="eyebrow">LOCATION RECORD</span><h3 id="mapTitle">Check-in location</h3></div><button id="closeMapBtn" class="ghost-btn" type="button">Close</button></div><div id="map"></div><div id="mapMeta" class="map-meta"></div></dialog>
+  <dialog id="inviteDialog"><div class="dialog-head"><div><span class="eyebrow">NEW INVITE</span><h3>Parent link code</h3></div><button id="closeInviteBtn" class="ghost-btn" type="button">Close</button></div><p>Share this code directly with the parent. It expires automatically.</p><div id="inviteCodeDisplay" class="invite-code">------</div><button id="copyInviteBtn" class="primary-btn wide" type="button">Copy code</button></dialog>
+
+  <footer><p>Family Check-In is a documentation tool, not a substitute for a court order or legal advice. Follow the exact terms of every active order of protection.</p></footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

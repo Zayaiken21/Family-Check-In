@@ -1,0 +1,10 @@
+{
+  "name":"Family Check-In",
+  "short_name":"Check-In",
+  "start_url":"./",
+  "display":"standalone",
+  "background_color":"#f3f7ff",
+  "theme_color":"#0a63ff",
+  "description":"Consent-based parent check-ins and caseworker review.",
+  "icons":[]
+}
